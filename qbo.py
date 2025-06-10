@@ -44,7 +44,7 @@ def load_qbo_data(file_path):
         raise IOError(f"Error loading QBO data from {file_path}: {e}")
 def main():
     # Example usage
-    file_path = 'data/1980_MERRA2_daily_TEM.nc'  # Replace with your QBO data file path
+    file_path = '../data/1980_MERRA2_daily_TEM.nc'  # Replace with your QBO data file path
     try:
         qbo_data = load_qbo_data(file_path)
         plot_qbo(qbo_data, variable='u', level=30)
