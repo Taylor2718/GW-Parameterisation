@@ -13,7 +13,7 @@ def plot_qbo(data, variable='u', level=30, cmap='viridis'):
     - cmap: Colormap for the plot (default is 'viridis').
     """
     if variable not in data.variables:
-        raise ValueError(f"Variable '{variable}' not found in the dataset.")
+        raise ValueError(f"Variable '{variable}' not found in dataset.")
 
     # Select the variable and pressure level
     qbo_data = data[variable].sel(plev=level)
