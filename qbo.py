@@ -1,7 +1,5 @@
 import glob
 import numpy as np
-import matplotlib
-matplotlib.use('Agg')     # <-- switch to the Agg backend
 import matplotlib.pyplot as plt
 import xarray as xr
 
