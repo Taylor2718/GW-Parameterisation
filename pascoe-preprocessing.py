@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 from scipy.signal import welch
 
 # --- SETTINGS ---
-pattern = '../data/MERRA2/*_MERRA2_daily_TEM.nc'
+pattern = '../data/MERRA2/TEM/*_MERRA2_daily_TEM.nc'
 lat_bnd = 5    # equatorial mean for Figs 1–2
 output_dir       = '../figures'
 # 38 real pressure‐level values (hPa)

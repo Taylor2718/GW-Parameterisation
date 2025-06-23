@@ -109,7 +109,7 @@ def plot_freq_pressure_power(freqs, power2d, filename,
     print(f"Saved zoomed frequency-pressure plot: {filename}")
 
 def plot_freq_pressure_amp(freqs, ampl2d, filename,
-                       fmin=0.02, fmax=0.5, pmin = 1, pmax = 70):
+                       fmin=0.02, fmax=0.075, pmin = 1, pmax = 70):
     """
     Contour-plot power2d vs frequency & pressure,
     zoomed in to [fmin, fmax] cycles/month.
@@ -133,8 +133,58 @@ def plot_freq_pressure_amp(freqs, ampl2d, filename,
     plt.close(fig)
     print(f"Saved zoomed frequency-pressure plot: {filename}")
 
+def plot_avg_amplitude_vs_pressure(freqs, ampl2d, plev, filename, fmin=0.02, fmax=0.075, ticks=[3,5,10,20,30,50,70]):
+
+    """
+    Compute the mean amplitude across a band of frequencies,
+    and plot it as a profile vs pressure (inverted log axis).
+
+    Parameters
+    ----------
+    freqs : 1d array
+        Frequencies (cycles per month).
+    ampl2d : 2d array, shape (nfreq, nlev)
+        Amplitude spectrum.
+    plev : 1d array
+        Pressure levels (hPa).
+    filename : str
+        Output file name (saved into output_dir).
+    fmin, fmax : float or None
+        If given, restrict averaging to freqs in [fmin, fmax].
+        If None, average over all frequencies.
+    ticks : list of floats
+        Pressure ticks for the y-axis.
+    """
+    # 1) pick frequency band
+    if fmin is None: fmin = freqs.min()
+    if fmax is None: fmax = freqs.max()
+    mask = (freqs >= fmin) & (freqs <= fmax)
+
+    # 2) mean across that band
+    avg_amp = ampl2d[mask, :].mean(axis=0)
+
+    # 3) plot
+    fig, ax = plt.subplots(figsize=(6,8))
+    ax.plot(avg_amp, plev, '-o', lw=2)
+    ax.set_xlabel('Mean Amplitude')
+    ax.set_title(f'Mean FFT Amplitude\n({fmin:.3f}–{fmax:.3f} cpm)')
+
+    # invert & log–scale pressure axis
+    ax.set_yscale('log')
+    ax.set_ylim(plev.max(), plev.min())
+    ax.set_yticks(ticks)
+    ax.set_yticklabels([f"{t:g}" for t in ticks])
+    ax.set_ylabel('Pressure (hPa)')
+    ax.grid(False)
+
+    # save
+    path = os.path.join(output_dir, filename)
+    fig.savefig(path, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    print(f"Saved average amplitude profile: {path}")
+
 # deseasonalized anomaly (QBO signal)
 plot_field(u_ds, title='Deseasonalized Zonal‐Mean Zonal Wind (QBO Anomaly, +/- 5 degrees)', filename='deseasonalized_qbo.png')
 plot_freq_pressure_power(freqs, power2d, 'power_freq_vs_pressure.png', pmin=pmin, pmax=pmax)
 plot_freq_pressure_amp(freqs, ampl2d, 'amp_freq_vs_pressure.png', pmin=pmin, pmax=pmax)
-
+plot_avg_amplitude_vs_pressure(freqs, ampl2d, plev, filename='avg_amp_vs_pressure.png', fmin=0.025, fmax=0.05)
