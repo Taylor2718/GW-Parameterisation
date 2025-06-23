@@ -1,108 +1,31 @@
-#!/usr/bin/env python3
-import os
-import numpy as np
 import xarray as xr
-import pandas as pd
+import numpy as np
 import matplotlib.pyplot as plt
+import os
+import pandas as pd
 
-# --- SETTINGS ---
-pattern = '../data/MERRA2/*_MERRA2_daily_TEM.nc'
-lat_bnd = 5    # equatorial mean for Figs 1–2
-output_dir       = '../figures'
-# 38 real pressure‐level values (hPa)
-plev = np.array([
-    0.0100, 0.0200, 0.0327, 0.0476, 0.0660, 0.0893, 0.1197, 0.1595,
-    0.2113, 0.2785, 0.3650, 0.4758, 0.6168, 0.7951, 1.0194, 1.3005,
-    1.6508, 2.0850, 2.6202, 3.2764, 4.0766, 5.0468, 6.2168, 7.6198,
-    9.2929, 11.2769, 13.6434, 16.4571, 19.7916, 23.7304, 28.3678,
-    33.8100, 40.1754, 47.6439, 56.3879, 66.6034, 78.5123, 92.3657
-])
+ds = xr.open_dataset("../data/qbo_fft_spectra.nc")
+freqs     = ds.freq.values
+power2d   = ds.power.values
+ampl2d    = ds.amplitude.values
+plev       = ds.lev.values
 
-def load_dataset(pattern):
-    """
-    Load MERRA-2 dataset from the specified pattern and assign pressure levels.
-    Parameters
-    ----------
-    pattern : str
-        File pattern to match MERRA-2 data files.
-    Returns
-    -------
-    xarray.Dataset
-        Dataset containing the MERRA-2 data with pressure levels assigned.
-    """
-    ds = xr.open_mfdataset(pattern, combine='by_coords')
-    # assign real pressure levels
-    ds = ds.assign_coords(lev=("lev", plev))
-    ds.lev.attrs.update(units="hPa", long_name="Pressure")
-    return ds
+ds_deseasonalised = xr.open_dataset("../data/u_deseasonalized.nc")
+u_ds = ds_deseasonalised.u_ds  # DataArray(time, lev)
+u_ds = u_ds.sel(lev=slice(1, 70))
 
-def compute_monthly_deseasonalized_u(ua, lat_bnd=5):
-    """
-    Given ua(time, lev, lat), return:
-      - u_mon: monthly-mean zonal-mean wind over ±lat_bnd
-      - u_ds : deseasonalized anomaly (u_mon minus its climatology)
-    """
-    # 1) Take equatorial +/-lat_bnd mean
-    u_eq = ua.sel(lat=slice(-lat_bnd, lat_bnd)).mean('lat')
-    
-    # 2) Compute monthly means (at the start-of-month)
-    u_mon = u_eq.resample(time='1MS').mean()
-    
-    # 3) Compute the monthly climatology (12-entry)
-    clim = u_mon.groupby('time.month').mean('time') #climatology for each month
-    
-    # 4) Subtract the climatology for each month
-    u_ds = u_mon.groupby('time.month') - clim
-    
-    return u_mon, u_ds
+output_dir = "../figures"
+os.makedirs(output_dir, exist_ok=True)
 
-def detect_qbo_cycles(u_ds, ref_lev=10, smooth_months=5):
-    """
-    Detect QBO phase onset times and compute cycle periods.
+pmin = plev.min()
+pmax = plev.max()
 
-    Parameters
-    ----------
-    u_ds : xarray.DataArray
-        Deseasonalized monthly u(time, lev) anomalies.
-    ref_lev : float
-        Pressure level (hPa) at which to detect zero-crossings.
-    smooth_months : int
-        Window size for the running mean (in months).
-
-    Returns
-    -------
-    onsets : pandas.DatetimeIndex
-        Times of west→east onsets (u crosses from negative to positive).
-    periods : pandas.Series
-        Length of each cycle in months, indexed by the onset time.
-    """
-    # 1) select the reference level
-    u_ref = u_ds.sel(lev=ref_lev, method='nearest')
-    
-    # 2) smooth with a centered rolling mean
-    u_smooth = u_ref.rolling(time=smooth_months, center=True).mean().dropna('time')
-    
-    # 3) find sign changes from negative to positive
-    sign = np.sign(u_smooth)
-    # shift by one to compare successive points
-    sign_prev = sign.shift(time=1)
-    # west->east onsets: sign_prev < 0, sign >= 0
-    on_w2e = u_smooth.time.where((sign_prev < 0) & (sign >= 0)).dropna('time')
-    
-    # 4) compute cycle lengths in months
-    on = pd.DatetimeIndex(on_w2e.values) #cycle length
-    # difference in months between successive onsets
-    periods = pd.Series((on[1:] - on[:-1]) / np.timedelta64(1, 'W'),
-                        index=on[1:]) # period in weeks
-    # convert to months (approx. 4.345 weeks per month)
-    periods = periods / 4.345 #periods in months, on average
-    return on, periods, u_smooth
-
-def style_pressure_axis(ax, ticks, plev=plev):
+def style_pressure_axis(ax, ticks):
     """Set log–inverted pressure axis with explicit limits."""
     ax.set_yscale('log')
+    ticks = np.array(ticks)
     # top (max) -> bottom (min)
-    ax.set_ylim(plev.max(), plev.min())
+    ax.set_ylim(np.max(ticks), np.min(ticks))
     ax.set_yticks(ticks)
     ax.set_yticklabels([f"{t:g}" for t in ticks])
     ax.set_ylabel('Pressure (hPa)')
@@ -159,27 +82,59 @@ def plot_onsets(u_smooth, onsets, uncertainty_months, title, filename):
     fig.savefig(path, dpi=150, bbox_inches='tight')
     print(f"Saved Figure: {path}")
 
-ds = load_dataset(pattern)
-# extract ua
-ua = ds['ua']
+def plot_freq_pressure_power(freqs, power2d, filename,
+                       fmin=0.02, fmax=0.075, pmin = 1, pmax = 70):
+    """
+    Contour-plot power2d vs frequency & pressure,
+    zoomed in to [fmin, fmax] cycles/month.
+    """
+    fig, ax = plt.subplots(figsize=(14,6))
+    cf = ax.contourf(freqs, plev, power2d.T,
+                 levels=np.linspace(0, power2d.max()*0.8, 15),
+                 cmap='viridis', extend='max')
+    style_pressure_axis(ax, [3, 5, 10, 20, 30, 50, 70])
+    ax.set_ylim(pmax, pmin)
+    ax.set_xlabel('Frequency (cycles per month)')
+    ax.set_title('FFT Power Spectrum: Frequency vs Pressure')
+    ax.set_xlim(fmin, fmax)                    
+    # find global peak:
+    f_idx, lev_idx = np.unravel_index(np.nanargmax(power2d), power2d.shape)
+    peak_freq = freqs[f_idx]
+    peak_plev = plev[lev_idx]
+    print(f"F.T. Peak frequency: {peak_freq:.4f} cycles/month at {peak_plev:.1f} hPa, Period: {1/peak_freq:.2f} months")
+    ax.axvline(peak_freq, color='white', linestyle='--', linewidth=1)
+    fig.colorbar(cf, ax=ax, pad=0.02, label='Power')
+    fig.savefig(os.path.join(output_dir, filename), dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    print(f"Saved zoomed frequency-pressure plot: {filename}")
 
-# get monthly and deseasonalized
-u_monthly, u_deseasonalized = compute_monthly_deseasonalized_u(ua, lat_bnd=5)
-
-# now u_monthly and u_deseasonalized have dims (time=monthly, lev)
-print(u_monthly)
-print(u_deseasonalized)
-
-# u_deseasonalized is monthly deseasonalized anomalies:
-onsets, cycle_periods, u_smooth = detect_qbo_cycles(u_deseasonalized, ref_lev=30, smooth_months=5)
-
-print("Detected westerly→easterly onsets at 30 hPa:\n", onsets)
-print("Cycle lengths (months):\n", cycle_periods.describe())
-
-# raw monthly zonal‐mean wind
-#plot_field(u_monthly, title='Monthly‐Mean Equatorial (+/- 5 degrees) Zonal‐Mean Zonal Wind', filename='monthly_zmzw.png')
+def plot_freq_pressure_amp(freqs, ampl2d, filename,
+                       fmin=0.02, fmax=0.5, pmin = 1, pmax = 70):
+    """
+    Contour-plot power2d vs frequency & pressure,
+    zoomed in to [fmin, fmax] cycles/month.
+    """
+    fig, ax = plt.subplots(figsize=(14,6))
+    cf = ax.contourf(freqs, plev, ampl2d.T,
+                 levels=np.linspace(0, ampl2d.max()*0.8, 5),
+                 cmap='viridis', extend='max')
+    style_pressure_axis(ax, [3, 5, 10, 20, 30, 50, 70])
+    ax.set_ylim(pmax, pmin)
+    ax.set_xlabel('Frequency (cycles per month)')
+    ax.set_title('FFT Amplitude: Frequency vs Pressure')
+    ax.set_xlim(fmin, fmax)                    
+    # find global peak:
+    f_idx, lev_idx = np.unravel_index(np.nanargmax(ampl2d), ampl2d.shape)
+    peak_freq = freqs[f_idx]
+    peak_plev = plev[lev_idx]
+    ax.axvline(peak_freq, color='white', linestyle='--', linewidth=1)
+    fig.colorbar(cf, ax=ax, pad=0.02, label='Amplitude')
+    fig.savefig(os.path.join(output_dir, filename), dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    print(f"Saved zoomed frequency-pressure plot: {filename}")
 
 # deseasonalized anomaly (QBO signal)
-#plot_field(u_deseasonalized, title='Deseasonalized Zonal‐Mean Zonal Wind (QBO Anomaly, +/- 5 degrees)', filename='deseasonalized_qbo.png')
+plot_field(u_ds, title='Deseasonalized Zonal‐Mean Zonal Wind (QBO Anomaly, +/- 5 degrees)', filename='deseasonalized_qbo.png')
+plot_freq_pressure_power(freqs, power2d, 'power_freq_vs_pressure.png', pmin=pmin, pmax=pmax)
+plot_freq_pressure_amp(freqs, ampl2d, 'amp_freq_vs_pressure.png', pmin=pmin, pmax=pmax)
 
-plot_onsets(u_smooth, onsets, uncertainty_months=1, title = 'Smoothed QBO Reference‐Level Wind with Onsets', filename = 'qbo_onsets.png')
