@@ -6,7 +6,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from scipy.signal import welch
 
-# --- SETTINGS ---
+# --- SETTINGS for MERRA2 analysis ---
 pattern = '../data/MERRA2/TEM/*_MERRA2_daily_TEM.nc'
 lat_bnd = 5    # equatorial mean for Figs 1–2
 output_dir       = '../figures'
@@ -99,7 +99,72 @@ def detect_qbo_cycles(u_ds, ref_lev=10, smooth_months=5):
 
     return onsets, periods, u_smooth
 
-from scipy.signal import welch
+def detect_qbo_cycles_all_levels(u_ds, smooth_months=5):
+    """
+    Detect QBO phase onsets and compute discrete cycle periods for all pressure levels in the dataset.
+
+    Parameters
+    ----------
+    u_ds : xarray.DataArray
+        Deseasonalized monthly u(time, lev) anomalies.
+    smooth_months : int
+        Window size for the running mean (in months).
+
+    Returns
+    -------
+    onsets : dict
+        Keys are pressure levels (hPa), values are pandas.DatetimeIndex of west->east onsets.
+    periods : dict
+        Keys are pressure levels (hPa), values are pandas.Series of integer month lengths between successive onsets.
+    u_smooth : xarray.DataArray
+        Smoothed wind field (time x lev) used for detection.
+    """
+    # 1) smooth all levels in time
+    u_smooth = u_ds.rolling(time=smooth_months, center=True).mean().dropna('time')
+
+    onsets = {}
+    periods = {}
+
+    # 2) loop over each pressure level
+    for lev in u_smooth.lev.values:
+        # select this level
+        u_ref = u_smooth.sel(lev=lev, method='nearest')
+
+        # detect onsets: sign change from negative to non-negative
+        sign_prev = np.sign(u_ref).shift(time=1)
+        sign = np.sign(u_ref)
+        onset_da = u_ref.time.where((sign_prev < 0) & (sign >= 0)).dropna('time')
+
+        # convert to pandas dates
+        lev_onsets = pd.to_datetime(onset_da.values)
+        onsets[lev] = lev_onsets
+
+        # 3) compute month differences between onsets
+        periods[lev] = pd.Series(
+            [(d2.year - d1.year) * 12 + (d2.month - d1.month)
+             for d1, d2 in zip(lev_onsets[:-1], lev_onsets[1:])],
+            index=pd.DatetimeIndex(lev_onsets[1:])
+        )
+
+    return onsets, periods, u_smooth
+
+def compute_vertical_fft_fast(u_ds):
+    """
+    Vectorized FFT power & amplitude spectra for each level in u_ds(time, lev).
+    Returns freqs (1D), power2d (freq × lev), ampl2d (freq × lev).
+    """
+    u = u_ds.dropna('time', how='all').values  # shape (ntime, nlev)
+    # remove the mean
+    u = u - np.nanmean(u, axis=0, keepdims=True)
+    N = u.shape[0]
+    # FFT
+    fft2d = np.fft.rfft(u, axis=0)
+    freqs = np.fft.rfftfreq(N, d=1.0)
+    # power‐spectrum (normalized so that Parseval holds)
+    power2d = (np.abs(fft2d)**2) / N
+    # one‐sided amplitude spectrum
+    ampl2d = 2.0 * np.abs(fft2d) / N
+    return freqs, power2d, ampl2d
 
 def compute_vertical_spectra_welch(u_ds, dt=1.0,
                                    window='hann',
@@ -168,6 +233,82 @@ def save_spectra_netcdf(freqs, power2d, ampl2d, lev, filename):
     ds.to_netcdf(filename)
     print(f"Wrote spectra to {filename}")
 
+def save_qbo_to_nc(onsets, periods, u_smooth, out_dir="../data/MERRA2/GWD", suffix='onsets', attrs=None):
+    """
+    Save QBO onsets, periods, and smoothed wind into a single NetCDF file in a specified directory.
+
+    Parameters
+    ----------
+    onsets : dict
+        Mapping of pressure level to pandas.DatetimeIndex of onsets.
+    periods : dict
+        Mapping of pressure level to pandas.Series of cycle lengths.
+    u_smooth : xarray.DataArray
+        Smoothed wind field used for detection.
+    out_dir : str
+        Directory path where the NetCDF file will be written (default: '../data/MERRA2/GWD').
+    prefix : str, optional
+        Prefix for the output filename (default: 'qbo').
+    attrs : dict, optional
+        Global attributes to add to the NetCDF, e.g., metadata.
+
+    Returns
+    -------
+    str
+        The path to the saved NetCDF file.
+    """
+    # Prepare level dimension
+    levels = np.array(list(onsets.keys()), dtype=float)
+    nlev = len(levels)
+
+    # Determine max number of onsets across levels
+    max_onsets = max(len(v) for v in onsets.values())
+
+    # Initialize arrays for onset times and periods
+    onset_times = np.full((nlev, max_onsets), np.datetime64('NaT'), dtype='datetime64[ns]')
+    period_vals = np.full((nlev, max_onsets), np.nan, dtype=float)
+
+    # Fill arrays
+    for i, lev in enumerate(levels):
+        lev_onsets = onsets[lev]
+        onset_times[i, :len(lev_onsets)] = lev_onsets.values.astype('datetime64[ns]')
+        lev_periods = periods.get(lev, pd.Series(dtype=float)).values
+        period_vals[i, 1:len(lev_onsets)] = lev_periods
+
+    # Create DataArrays
+    onset_da = xr.DataArray(
+        onset_times,
+        dims=('lev', 'onset_index'),
+        coords={'lev': levels, 'onset_index': np.arange(max_onsets)},
+        name='onset_times'
+    )
+    period_da = xr.DataArray(
+        period_vals,
+        dims=('lev', 'onset_index'),
+        coords={'lev': levels, 'onset_index': np.arange(max_onsets)},
+        name='period_months'
+    )
+
+    # Combine into Dataset
+    ds = xr.Dataset({
+        'onset_times': onset_da,
+        'period_months': period_da,
+        'u_smooth': u_smooth
+    })
+
+    # Add global attributes if provided
+    if attrs:
+        ds.attrs.update(attrs)
+
+    # Construct file path and ensure directory exists
+    os.makedirs(out_dir, exist_ok=True)
+    filepath = os.path.join(out_dir, f"qbo_{suffix}.nc")
+
+    # Save to NetCDF
+    ds.to_netcdf(filepath)
+
+    return filepath
+
 ds = load_dataset(pattern)
 # extract ua
 ua = ds['ua']
@@ -184,21 +325,43 @@ print(u_deseasonalized)
 
 # u_deseasonalized is monthly deseasonalized anomalies:
 onsets, cycle_periods, u_smooth = detect_qbo_cycles(u_deseasonalized, ref_lev=30, smooth_months=5)
+#onsets_all, cycle_periods_all, u_smooth_all = detect_qbo_cycles_all_levels(u_deseasonalized, smooth_months=5)
+period_desc = cycle_periods.describe()
+period_desc.to_csv('../data/MERRA2/TEM/period_desc_30hPa.csv')
 
 print("Detected westerly→easterly onsets at 30 hPa:\n", onsets)
-print("Cycle lengths (months):\n", cycle_periods.describe())
+print("Cycle lengths (months):\n", period_desc)
 
-freqs, power2d, ampl2d = compute_vertical_spectra_welch(u_deseasonalized)
+#freqs, power2d, ampl2d = compute_vertical_spectra_welch(u_deseasonalized)
+freqs, power2d, ampl2d = compute_vertical_fft_fast(u_deseasonalized)
 save_spectra_netcdf(freqs, power2d, ampl2d, u_deseasonalized.lev.values,
-                    "../data/qbo_fft_spectra.nc")
+                    "../data/MERRA2/TEM/qbo_fft_spectra.nc")
 
 # If u_deseasonalized is a DataArray, wrap it in a Dataset for to_netcdf()
 ds_out = xr.Dataset(
     {"u_ds": u_deseasonalized},
     coords={"time": u_deseasonalized.time, "lev": u_deseasonalized.lev}
 )
+
 ds_out.time.attrs["long_name"] = "Time"
 ds_out.lev.attrs["long_name"]  = "Pressure (hPa)"
 ds_out.u_ds.attrs["units"]     = ua.attrs.get("units", "")
-ds_out.to_netcdf("../data/u_deseasonalized.nc")
+ds_out.to_netcdf("../data/MERRA2/TEM/u_deseasonalized.nc")
 print("Wrote deseasonalized anomalies to u_deseasonalized.nc")
+"""
+# Save QBO onsets and periods to NetCDF
+qbo_filepath = save_qbo_to_nc(
+    onsets_all, cycle_periods_all, u_smooth_all,
+    out_dir="../data/MERRA2/TEM",
+    suffix='onsets',
+    attrs={
+        "description": "QBO onsets and periods derived from MERRA-2 zonal wind anomalies",
+        "source": "MERRA-2",
+        "lat_bnd": lat_bnd,
+        "ref_lev": 30,
+        "smooth_months": 5,
+        "created_by": "pascoe-preprocessing.py"
+    }
+)
+print(f"Saved QBO onsets and periods to {qbo_filepath}")
+"""
